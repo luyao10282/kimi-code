@@ -7,6 +7,13 @@ import { DEFAULT_PROFILE_NAME } from '#/session/subagent/spawn';
 export { DEFAULT_PROFILE_NAME };
 export const RESUMED_LABEL = 'subagent';
 
+const CLAUDE_SUBAGENT_ALIASES: Record<string, string> = {
+  'general-purpose': 'coder',
+  claude: 'coder',
+  Explore: 'explore',
+  Plan: 'plan',
+};
+
 export const SubagentToolInputSchema = z.preprocess(
   (input) => {
     if (typeof input !== 'object' || input === null || Array.isArray(input)) {
@@ -14,6 +21,10 @@ export const SubagentToolInputSchema = z.preprocess(
     }
     const record = input as Record<string, unknown>;
     const normalized = { ...record };
+    const rawSubagentType = normalized['subagent_type'];
+    if (typeof rawSubagentType === 'string' && Object.hasOwn(CLAUDE_SUBAGENT_ALIASES, rawSubagentType)) {
+      normalized['subagent_type'] = CLAUDE_SUBAGENT_ALIASES[rawSubagentType];
+    }
     const hasResumeId =
       typeof normalized['resume'] === 'string' && normalized['resume'].trim().length > 0;
     const hasSubagentType =

@@ -240,6 +240,8 @@ function assertValidSubagentDefaultEffort(
 
 export type SubagentModelSource = 'forced' | 'primary_override' | 'inherited' | 'secondary_pool';
 
+const CLAUDE_MODEL_TIER_ALIASES = new Set(['sonnet', 'opus', 'haiku', 'fable']);
+
 export function resolveSubagentBinding(
   config: IConfigService,
   own: { modelAlias: string; thinkingLevel: string },
@@ -272,7 +274,7 @@ export function resolveSubagentBinding(
   }
   const pool = resolveSubagentModelPool(config);
   if (pool === undefined) {
-    if (requested !== undefined) {
+    if (requested !== undefined && !CLAUDE_MODEL_TIER_ALIASES.has(requested.toLowerCase())) {
       throw new Error2(
         ErrorCodes.CONFIG_INVALID,
         `Invalid model "${requested}": no [secondary_model.models] pool is configured, so subagents inherit the caller's model (pass "primary" or omit the model parameter).`,
