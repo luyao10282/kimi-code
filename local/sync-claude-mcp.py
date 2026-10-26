@@ -5,6 +5,7 @@ from pathlib import Path
 
 CLAUDE_JSON = Path.home() / ".claude.json"
 KIMI_MCP_JSON = Path.home() / ".kimi-code" / "mcp.json"
+EXCLUDED_SERVERS = {"free_subagent"}
 
 
 def main() -> None:
@@ -29,8 +30,12 @@ def main() -> None:
         kimi_servers = {}
 
     changed = False
+    for name in EXCLUDED_SERVERS:
+        if name in kimi_servers:
+            del kimi_servers[name]
+            changed = True
     for name, cfg in claude_servers.items():
-        if not isinstance(cfg, dict):
+        if name in EXCLUDED_SERVERS or not isinstance(cfg, dict):
             continue
         if kimi_servers.get(name) != cfg:
             kimi_servers[name] = cfg
