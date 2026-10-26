@@ -788,7 +788,7 @@ export async function runUpdatePreflight(
   const logger = options.logger ?? log;
   const platform = process.platform;
 
-  if (isAutoUpdateDisabledByEnv()) {
+  if (isAutoUpdateDisabledByEnv() || !(await shouldAutoInstallUpdates())) {
     return 'continue';
   }
 

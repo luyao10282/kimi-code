@@ -17,6 +17,7 @@ fi
 
 cp -f apps/kimi-code/dist-native/bin/darwin-arm64/kimi "${KIMI_BIN}.tmp"
 mv -f "${KIMI_BIN}.tmp" "$KIMI_BIN"
+rm -rf "$(dirname "$KIMI_BIN")/.staging"
 python3 "$REPO_ROOT/local/sync-claude-mcp.py"
 ln -sfn "$HOME/.claude/skills" "$HOME/.kimi-code/skills"
 echo "Installed local kimi binary: $($KIMI_BIN --version)"
