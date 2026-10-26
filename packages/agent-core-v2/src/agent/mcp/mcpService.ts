@@ -45,10 +45,16 @@ export const mcpDiscoveryWritesReadyKey = defineState<boolean>(
   () => false,
 );
 
+const MCP_INSTRUCTIONS_HEADER =
+  '# MCP Server Instructions\n\n' +
+  'The following MCP servers have provided instructions for how to use their tools and resources:\n\n';
+
 export class AgentMcpService extends Service implements IAgentMcpService {
   declare readonly _serviceBrand: undefined;
   private readonly mcpTools = new Map<string, McpToolRegistration>();
   private readonly pendingDiscoveries: Array<() => void> = [];
+  private appliedInstructionsSuffix = '';
+  private instructionsSyncActive = false;
 
   constructor(
     @ISessionMcpHandle private readonly mcpHandle: ISessionMcpHandle,
@@ -69,6 +75,7 @@ export class AgentMcpService extends Service implements IAgentMcpService {
     this.attachMcpTools();
     loop.hooks.onWillBeginStep.register('mcp', async (ctx, next) => {
       await this.waitForInitialLoad(ctx.signal);
+      this.instructionsSyncActive = true;
       this.syncMcpInstructions();
       await next();
     });
@@ -162,6 +169,9 @@ export class AgentMcpService extends Service implements IAgentMcpService {
     this._register(
       this.onStatusChange((entry) => {
         this.handleMcpServerStatusChange(entry);
+        if (this.instructionsSyncActive) {
+          this.syncMcpInstructions();
+        }
       }),
     );
   }
@@ -366,12 +376,6 @@ export class AgentMcpService extends Service implements IAgentMcpService {
   }
 
   private syncMcpInstructions(): void {
-    if (
-      typeof this.profile.getSystemPrompt !== 'function' ||
-      typeof this.profile.update !== 'function'
-    ) {
-      return;
-    }
     const sections: string[] = [];
     for (const entry of this.list()) {
       if (!this.mcpHandle.isBaselineServer(entry.name) || entry.status !== 'connected') continue;
@@ -380,19 +384,37 @@ export class AgentMcpService extends Service implements IAgentMcpService {
         sections.push(`## ${entry.name}\n${instructions}`);
       }
     }
-    if (sections.length === 0) return;
     const block =
-      '# MCP Server Instructions\n\n' +
-      'The following MCP servers have provided instructions for how to use their tools and resources:\n\n' +
-      sections.join('\n\n');
+      sections.length === 0 ? undefined : `${MCP_INSTRUCTIONS_HEADER}${sections.join('\n\n')}`;
+    if (typeof this.profile.setMcpInstructions === 'function') {
+      this.profile.setMcpInstructions(block);
+      return;
+    }
+    if (
+      typeof this.profile.getSystemPrompt !== 'function' ||
+      typeof this.profile.update !== 'function'
+    ) {
+      return;
+    }
     const current = this.profile.getSystemPrompt();
-    if (current.length === 0) return;
-    const marker = '\n\n# MCP Server Instructions\n\n';
-    const index = current.indexOf(marker);
-    const base = index === -1 ? current : current.slice(0, index);
-    const next = `${base}\n\n${block}`;
+    const previousSuffix = this.appliedInstructionsSuffix;
+    const base =
+      previousSuffix.length > 0 && current.endsWith(previousSuffix)
+        ? current.slice(0, current.length - previousSuffix.length)
+        : current;
+    const environmentDisclosure = this.profile.data?.().environmentDisclosure;
+    if (block === undefined) {
+      this.appliedInstructionsSuffix = '';
+      if (base !== current) {
+        this.profile.update({ systemPrompt: base, environmentDisclosure });
+      }
+      return;
+    }
+    const nextSuffix = base.length === 0 ? block : `\n\n${block}`;
+    const next = `${base}${nextSuffix}`;
+    this.appliedInstructionsSuffix = nextSuffix;
     if (next !== current) {
-      this.profile.update({ systemPrompt: next });
+      this.profile.update({ systemPrompt: next, environmentDisclosure });
     }
   }
 
