@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { type CollectionView } from '#/_base/di/collection';
 import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { IInstantiationService } from '#/_base/di/instantiation';
@@ -27,7 +28,9 @@ import { TOOL_SELECT_FLAG_ID } from '#/agent/toolSelect/flag';
 import { SELECT_TOOLS_TOOL_NAME } from '#/agent/toolSelect/toolSelect';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentRuntimeService } from '#/agent/runtimeBinding/agentRuntime';
+import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { IAgentLoopService } from '#/agent/loop/loop';
+import { AssistantDelta, TurnStepCompleted, TurnStepStarted } from '#/agent/loop/turnEvents';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import {
   ToolAccesses,
@@ -82,6 +85,7 @@ import {
 import {
   BACKGROUND_AGENT_UNAVAILABLE,
   DEFAULT_PROFILE_NAME,
+  DELIVER_TO_USER_WITH_BACKGROUND_UNAVAILABLE,
   ISubagentTool,
   RESUME_WITH_TYPE_UNAVAILABLE,
   RESUMED_LABEL,
@@ -277,6 +281,10 @@ export class SubagentTool implements ISubagentTool {
       return { output: RESUME_WITH_TYPE_UNAVAILABLE, isError: true };
     }
 
+    if (args.deliver_to_user === true && args.run_in_background === true) {
+      return { output: DELIVER_TO_USER_WITH_BACKGROUND_UNAVAILABLE, isError: true };
+    }
+
     if (args.fork === true) {
       if (!this.flags.enabled(SUBAGENT_FORK_FLAG_ID)) {
         return { output: FORK_EXPERIMENTAL_UNAVAILABLE, isError: true };
@@ -456,7 +464,7 @@ export class SubagentTool implements ISubagentTool {
 
   private async execution(
     args: SubagentToolInput,
-    { toolCallId, signal }: ExecutableToolContext,
+    { turnId, toolCallId, signal }: ExecutableToolContext,
   ): Promise<ExecutableToolResult> {
     try {
       signal.throwIfAborted();
@@ -467,6 +475,10 @@ export class SubagentTool implements ISubagentTool {
 
       if (isResume && requestedProfileName !== undefined) {
         return { output: RESUME_WITH_TYPE_UNAVAILABLE, isError: true };
+      }
+
+      if (args.deliver_to_user === true && runInBackground) {
+        return { output: DELIVER_TO_USER_WITH_BACKGROUND_UNAVAILABLE, isError: true };
       }
 
       if (args.fork === true) {
@@ -570,7 +582,15 @@ export class SubagentTool implements ISubagentTool {
           output: formatBackgroundAgentResult(taskId, handle, args.description, allowBackground, true),
         };
       }
-      return await this.formatForegroundResult(taskId, handle, timeoutMs);
+      return await this.formatForegroundResult(
+        taskId,
+        handle,
+        timeoutMs,
+        args.deliver_to_user === true,
+        toolCallId,
+        turnId,
+        signal,
+      );
     } catch (error) {
       return { output: `subagent error: ${launchErrorMessage(error, signal)}`, isError: true };
     }
@@ -580,12 +600,116 @@ export class SubagentTool implements ISubagentTool {
     taskId: string,
     handle: SubagentHandle,
     timeoutMs: number,
+    deliverToUser = false,
+    toolCallId?: string,
+    turnId?: number,
+    signal?: AbortSignal,
   ): Promise<ExecutableToolResult> {
     const info = this.tasks.getTask(taskId);
     const stopCode = info?.kind === 'agent' ? info.stopCode : undefined;
     if (info?.status === 'completed') {
+      const output = await this.tasks.readOutput(taskId);
+      const shouldDeliver =
+        deliverToUser &&
+        !signal?.aborted &&
+        stopCode !== REPEAT_BREAKER_STOP_REASON &&
+        output.trim().length > 0;
+      if (shouldDeliver) {
+        const requester = this.agentLifecycle.handleOf(this.callerAgentId);
+        let loop: IAgentLoopService | undefined;
+        let dispatcher: IEventDispatcher | undefined;
+        let contextMemory: IAgentContextMemoryService | undefined;
+        try {
+          loop = requester?.accessor.get(IAgentLoopService);
+        } catch {}
+        try {
+          dispatcher = requester?.accessor.get(IEventDispatcher);
+        } catch {}
+        try {
+          contextMemory = requester?.accessor.get(IAgentContextMemoryService);
+        } catch {}
+        if (
+          loop?.hooks?.onDidFinishStep !== undefined &&
+          (dispatcher !== undefined || contextMemory !== undefined)
+        ) {
+          let cleanup = (): void => {};
+          const onAbort = (): void => {
+            cleanup();
+          };
+          const disposable = loop.hooks.onDidFinishStep.register(
+            `agent-deliver-${toolCallId ?? taskId}`,
+            async (stepCtx, next) => {
+              cleanup();
+              if (
+                !stepCtx.signal.aborted &&
+                !signal?.aborted &&
+                (turnId === undefined || stepCtx.turnId === turnId)
+              ) {
+                const deliveryStep = stepCtx.step + 1;
+                const deliveryStepId = randomUUID();
+                contextMemory?.appendLoopEvent({
+                  type: 'step.begin',
+                  uuid: deliveryStepId,
+                  turnId: String(stepCtx.turnId),
+                  step: deliveryStep,
+                });
+                contextMemory?.appendLoopEvent({
+                  type: 'content.part',
+                  uuid: randomUUID(),
+                  turnId: String(stepCtx.turnId),
+                  step: deliveryStep,
+                  stepUuid: deliveryStepId,
+                  part: { type: 'text', text: output },
+                });
+                contextMemory?.appendLoopEvent({
+                  type: 'step.end',
+                  uuid: deliveryStepId,
+                  turnId: String(stepCtx.turnId),
+                  step: deliveryStep,
+                  finishReason: 'completed',
+                });
+                void dispatcher?.dispatch(
+                  new TurnStepStarted({
+                    agentId: this.callerAgentId,
+                    turnId: stepCtx.turnId,
+                    step: deliveryStep,
+                    stepId: deliveryStepId,
+                  }),
+                );
+                void dispatcher?.dispatch(
+                  new AssistantDelta({
+                    agentId: this.callerAgentId,
+                    turnId: stepCtx.turnId,
+                    delta: output,
+                  }),
+                );
+                void dispatcher?.dispatch(
+                  new TurnStepCompleted({
+                    agentId: this.callerAgentId,
+                    turnId: stepCtx.turnId,
+                    step: deliveryStep,
+                    stepId: deliveryStepId,
+                    finishReason: 'completed',
+                  }),
+                );
+              }
+              await next();
+            },
+          );
+          cleanup = (): void => {
+            signal?.removeEventListener('abort', onAbort);
+            disposable.dispose();
+          };
+          if (signal?.aborted) {
+            cleanup();
+          } else {
+            signal?.addEventListener('abort', onAbort, { once: true });
+          }
+        }
+      }
       return {
-        output: formatForegroundAgentSuccess(handle, await this.tasks.readOutput(taskId), stopCode),
+        output: formatForegroundAgentSuccess(handle, output, stopCode),
+        stopTurn: shouldDeliver ? true : undefined,
       };
     }
     const timedOut = info?.status === 'timed_out';
