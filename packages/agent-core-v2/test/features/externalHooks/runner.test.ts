@@ -7,7 +7,7 @@ import { HostProcessService } from '#/os/backends/node-local/hostProcessService'
 const hostProcess = new HostProcessService();
 
 function nodeCommand(source: string): string {
-  return `node -e ${JSON.stringify(source.replace(/\s*\n\s*/g, ' '))}`;
+  return `node -e ${JSON.stringify(source.replaceAll(/\s*\n\s*/g, ' '))}`;
 }
 
 describe('runHook process runner', () => {
@@ -142,6 +142,20 @@ describe('runHook process runner', () => {
 
     expect(result.action).toBe('block');
     expect(result.reason).toBe('use rg');
+  });
+
+  it('parses top-level decision=block and reason into a block result', async () => {
+    const result = await runHook(
+      hostProcess,
+      nodeCommand(
+        'process.stdout.write(JSON.stringify({ decision: "block", reason: "blocked by top-level decision" }));',
+      ),
+      { tool_name: 'Bash' },
+      { timeout: 5 },
+    );
+
+    expect(result.action).toBe('block');
+    expect(result.reason).toBe('blocked by top-level decision');
   });
 
   it('writes the input payload to the hook process stdin as JSON', async () => {

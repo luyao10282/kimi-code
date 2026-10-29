@@ -4,6 +4,7 @@ import { Service } from '#/_base/di/service';
 import { defineState } from '#/state/state';
 import { isPlainRecord } from '#/_base/utils/canonical-args';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentTaskService, type AgentTaskInfo, type AgentTaskNotificationContext } from '#/agent/task/task';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
@@ -36,6 +37,7 @@ import { toKimiErrorPayload } from '#/errors';
 import { wrapSystemReminder } from '#/features/reminder/systemReminder';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
 import { IEventDispatcher } from '#/state/eventDispatcher';
 
 import { IAgentExternalHooksService } from './agentExternalHooks';
@@ -117,7 +119,64 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
   }> = [];
 
   private withSessionFacts(inputData: Record<string, unknown>): Record<string, unknown> {
-    return { sessionTitle: this.sessionTitle, ...inputData };
+    const facts: Record<string, unknown> = { sessionTitle: this.sessionTitle };
+    const model = this.resolveCurrentModel();
+    if (model !== undefined) {
+      facts.model = model;
+    }
+    const thinking = this.resolveCurrentThinking();
+    if (thinking !== undefined) {
+      facts.thinking = thinking;
+    }
+    const contextTokens = this.resolveContextTokens();
+    if (contextTokens !== undefined) {
+      facts.contextTokens = contextTokens;
+    }
+    return { ...facts, ...inputData };
+  }
+
+  private withAgentRuntimeFacts(inputData: Record<string, unknown>): Record<string, unknown> {
+    return this.withSessionFacts({
+      agentId: this.scopeContext.agentId,
+      transcriptPath: `${this.sessionContext.sessionDir}/agents/${this.scopeContext.agentId}/wire.jsonl`,
+      ...inputData,
+    });
+  }
+
+  private resolveCurrentModel(): string | undefined {
+    try {
+      const profile = this.instantiation.invokeFunction((accessor) =>
+        accessor.get(IAgentProfileService),
+      );
+      const model = profile.getModel().trim();
+      return model.length > 0 ? model : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private resolveCurrentThinking(): string | undefined {
+    try {
+      const profile = this.instantiation.invokeFunction((accessor) =>
+        accessor.get(IAgentProfileService),
+      );
+      const thinking = profile.getEffectiveThinkingLevel();
+      return typeof thinking === 'string' && thinking.length > 0 ? thinking : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private resolveContextTokens(): number | undefined {
+    try {
+      const tokenCounting = this.instantiation.invokeFunction((accessor) =>
+        accessor.get(ISessionTokenCountingService),
+      );
+      const size = tokenCounting.statusSize(this.scopeContext.agentContext);
+      return Number.isFinite(size) && size >= 0 ? size : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private get stopHookContinuationUsed(): boolean {
@@ -360,7 +419,7 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
       signal: ctx.signal,
       cwd: this.sessionContext.cwd,
       sessionId: this.sessionContext.sessionId,
-      inputData: this.withSessionFacts({
+      inputData: this.withAgentRuntimeFacts({
         toolName: ctx.toolCall.name,
         toolInput,
         toolCallId: ctx.toolCall.id,
@@ -394,7 +453,7 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
         signal: ctx.signal,
         cwd: this.sessionContext.cwd,
         sessionId: this.sessionContext.sessionId,
-        inputData: this.withSessionFacts({
+        inputData: this.withAgentRuntimeFacts({
           toolName: ctx.toolCall.name,
           toolInput: isPlainRecord(ctx.args) ? ctx.args : {},
           toolCallId: ctx.toolCall.id,
@@ -428,10 +487,9 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
       signal,
       cwd: this.sessionContext.cwd,
       sessionId: this.sessionContext.sessionId,
-      inputData: this.withSessionFacts({
+      inputData: this.withAgentRuntimeFacts({
         prompt: promptText,
         isSteer: ctx.isSteer,
-        transcriptPath: `${this.sessionContext.sessionDir}/agents/${this.scopeContext.agentId}/wire.jsonl`,
       }),
     });
     signal.throwIfAborted();

@@ -53,6 +53,8 @@ const HookSpecificOutputSchema = z.preprocess(
     .optional(),
 );
 const HookJsonOutputSchema = z.looseObject({
+  decision: z.unknown().optional(),
+  reason: OptionalStringSchema,
   message: OptionalStringSchema,
   systemMessage: OptionalStringSchema,
   additionalContext: OptionalStringSchema,
@@ -199,10 +201,11 @@ function structuredOutput(
     const output = HookJsonOutputSchema.safeParse(parsed);
     if (!output.success) return undefined;
 
-    const { message, systemMessage, additionalContext, hookSpecificOutput } = output.data;
+    const { decision, reason, message, systemMessage, additionalContext, hookSpecificOutput } =
+      output.data;
     const statusMessage = joinDistinctNonEmpty([
       message,
-       hookSpecificOutput?.message,
+      hookSpecificOutput?.message,
       systemMessage,
     ]);
     const contextMessage = joinDistinctNonEmpty([
@@ -217,17 +220,20 @@ function structuredOutput(
         : undefined,
       structuredOutput: true as const,
     };
-    if (hookSpecificOutput?.permissionDecision !== 'deny') {
+    const isBlocked =
+      hookSpecificOutput?.permissionDecision === 'deny' || decision === 'block';
+    if (!isBlocked) {
       return result;
     }
+    const blockReason =
+      typeof hookSpecificOutput?.permissionDecisionReason === 'string'
+        ? hookSpecificOutput.permissionDecisionReason
+        : reason;
     return {
       action: 'block',
       message: statusMessage ?? contextMessage,
       additionalContext: contextMessage,
-      reason:
-        typeof hookSpecificOutput.permissionDecisionReason === 'string'
-          ? hookSpecificOutput.permissionDecisionReason
-          : undefined,
+      reason: blockReason,
       structuredOutput: true as const,
     };
   } catch {

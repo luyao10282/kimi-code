@@ -79,7 +79,9 @@ import {
   ISessionAgentProfileCatalog,
 } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
 import { IModelService } from '#/llm-adapter/model/model';
+import { IAgentProfileService } from '#/agent/profile/profile';
 
 import { stubBootstrap } from '../../app/bootstrap/stubs';
 import { stubLoopWithHooks, stubToolExecutor } from '../../agent/loop/stubs';
@@ -1690,6 +1692,110 @@ describe('IExternalHooksRunnerService integration', () => {
       expect((context.messages[1]?.content[0] as any)?.text).toContain('[post-status] ok');
       expect((context.messages[1]?.content[0] as any)?.text).toContain(
         '[post-hook] saw response:file edited',
+      );
+    } finally {
+      ix?.dispose();
+      disposables.dispose();
+    }
+  });
+
+  it('passes model, thinking, context_tokens, transcript_path, and agent_id to PreToolUse and PostToolUse hooks', async () => {
+    const disposables = new DisposableStore();
+    let ix: TestInstantiationService | undefined;
+    try {
+      const loop = stubLoopWithHooks();
+      const context = stubContextMemory();
+      const beforeEmitter = disposables.add(new Emitter<any>());
+      const baseToolExec = stubToolExecutor();
+      const toolExecutor: IAgentToolExecutorService = {
+        ...baseToolExec,
+        onBeforeExecuteTool: beforeEmitter.event,
+      };
+      const engine = makeHookRunner([
+        {
+          event: 'PreToolUse',
+          matcher: 'Bash',
+          command: stdinScript([
+            'process.stdout.write(JSON.stringify({',
+            '  hookSpecificOutput: {',
+            '    hookEventName: "PreToolUse",',
+            '    additionalContext: [',
+            '      parsed.model,',
+            '      parsed.thinking,',
+            '      String(parsed.context_tokens),',
+            '      parsed.agent_id,',
+            '      parsed.transcript_path,',
+            '    ].join("|"),',
+            '  },',
+            '}));',
+          ].join('\n')),
+          timeout: 5,
+        },
+      ]);
+
+      ix = createServices(disposables, {
+        strict: true,
+        additionalServices: (reg) => {
+          registerStateServices(reg);
+          registerTestAgentWireServices(reg, 'wire/external-hooks');
+          reg.defineInstance(IBootstrapService, stubBootstrap());
+          reg.defineInstance(ISessionContext, stubSessionContext());
+          reg.defineInstance(ISessionMetadata, stubSessionMetadata());
+          reg.definePartialInstance(IConfigService, {});
+          reg.definePartialInstance(IPluginService, {});
+          reg.defineInstance(IAgentContextMemoryService, context);
+          reg.defineInstance(IAgentLoopService, loop);
+          registerAgentEventBus(reg);
+          reg.defineInstance(IAgentToolExecutorService, toolExecutor);
+          reg.definePartialInstance(IAgentPermissionGate, {});
+          reg.definePartialInstance(IAgentFullCompactionService, {
+            hooks: createHooks(['onWillCompact']),
+          });
+          reg.definePartialInstance(IAgentTaskService, {});
+          reg.definePartialInstance(IAgentProfileService, {
+            getModel: () => 'genai/gemini-4-argon',
+            getEffectiveThinkingLevel: () => 'high',
+          });
+          reg.definePartialInstance(ISessionTokenCountingService, {
+            statusSize: () => 84321,
+          });
+        },
+      });
+      activateAgentEventBus(ix);
+      ix.set(IExternalHooksRunnerService, engine);
+      ix.set(IAgentExternalHooksService, new SyncDescriptor(AgentExternalHooksService));
+      ix.get(IAgentExternalHooksService);
+
+      const signal = new AbortController().signal;
+      for (const listener of (beforeEmitter as any)._listeners ?? []) {
+        await listener.listener.call(listener.thisArg, {
+          turnId: 1,
+          signal,
+          toolCall: { id: 'c-bash', type: 'function', name: 'Bash', arguments: '{}' },
+          toolCalls: [],
+          args: { command: 'ls' },
+          execution: { execute: async () => ({ output: 'ok' }) },
+          veto: () => {},
+          allow: () => {},
+          pass: () => {},
+          updateArgs: () => {},
+          waitUntil: () => {},
+        });
+      }
+
+      await toolExecutor.hooks.onDidExecuteTool.run({
+        turnId: 1,
+        signal,
+        toolCall: { id: 'c-bash', type: 'function', name: 'Bash', arguments: '{}' },
+        toolCalls: [],
+        args: { command: 'ls' },
+        outcome: 'executed',
+        result: { output: 'ok' },
+      });
+
+      expect(context.messages).toHaveLength(1);
+      expect((context.messages[0]?.content[0] as any)?.text).toContain(
+        'genai/gemini-4-argon|high|84321|main|/tmp/session-1/agents/main/wire.jsonl',
       );
     } finally {
       ix?.dispose();
